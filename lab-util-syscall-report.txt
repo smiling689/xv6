@@ -167,3 +167,38 @@ xv6在运行时大致的运行模式是：
 解决方法：在 sys_sysinfo 函数中获取内存信息时，先获取 kalloc_lock 锁，确保在获取内存信息的过程中不会有其他进程修改内存状态。获取完信息后再释放锁。
 
 进程数的数据来源是 kernel/proc.c 中的 proc 数组，可以通过遍历这个数组来统计当前系统中有多少个进程正在运行。同样需要获取锁。
+
+### 10. 新建python 3.12环境运行测试 make grade 得到：
+
+== Test sleep, no arguments == 
+$ make qemu-gdb
+sleep, no arguments: OK (2.2s) 
+== Test sleep, returns == 
+$ make qemu-gdb
+sleep, returns: OK (0.8s) 
+== Test sleep, makes syscall == 
+$ make qemu-gdb
+sleep, makes syscall: OK (1.1s) 
+== Test pingpong == 
+$ make qemu-gdb
+pingpong: OK (1.0s) 
+== Test lab-util-syscall-report.txt == 
+lab-util-syscall-report.txt: OK 
+== Test trace 32 grep == 
+$ make qemu-gdb
+trace 32 grep: OK (1.1s) 
+== Test trace all grep == 
+$ make qemu-gdb
+trace all grep: OK (0.9s) 
+== Test trace nothing == 
+$ make qemu-gdb
+trace nothing: OK (1.1s) 
+== Test trace children == 
+$ make qemu-gdb
+trace children: OK (7.3s) 
+== Test sysinfotest == 
+$ make qemu-gdb
+sysinfotest: OK (1.0s) 
+Score: 80/80
+
+测试均通过。
