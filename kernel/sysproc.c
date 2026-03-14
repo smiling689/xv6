@@ -102,3 +102,13 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+uint64
+sys_trace(void)
+{
+    int mask;
+    // argint函数用于获取系统调用的第一个参数，并将其存储在mask变量中
+    argint(0, &mask);
+    myproc()->trace_mask = mask;
+    return 0;
+}

@@ -5,6 +5,7 @@ typedef long int off_t;
 struct stat;
 
 // system calls
+int trace(int);
 int fork(void);
 int exit(int) __attribute__((noreturn));
 int wait(int*);
