@@ -1,0 +1,32 @@
+## My notes for Lab 1: System Calls
+
+### 1. clang
+
+在开始实验时发现clang在编译user.echo.c时无法找到kernel中的头文件，排查后发现是因为clang默认的头文件路径不包含kernel中的头文件路径。
+
+解决方法：新增使用compile_flags参数指定头文件路径。
+
+### 2. qemu-system-misc 安装报错
+
+在安装qemu-system-misc时遇到报错pkgProblemResolver::Resolve generated breaks。
+
+检查得是 apt 源混用了两个 Ubuntu 版本。系统是 Ubuntu 20.04 focal，但源里多了一条 Ubuntu 22.04 jammy：
+
+  /etc/apt/sources.list 里面现在同时有：
+
+  - focal
+  - focal-updates
+  - focal-security
+  - jammy
+
+  apt 在解依赖时开始尝试往 jammy 方向升级一部分桌面包，结果依赖链对不上，就报了 pkgProblemResolver::Resolve generated breaks
+  
+  解决办法：把那条 jammy 源注释掉，然后更新索引再装 QEMU 成功。
+
+### 3. sleep.c遇到的问题
+
+在尝试sleep.c的时候，发现输入的第二个参数如果是负数或者包含非数字字符，不会报错
+
+原因：检查知，xv6 的 atoi 在 user/ulib.c:84 里只会连续读取数字字符，"-1" 中的 '-' 或者非数字无法识别。
+
+解决方法：在 sleep.c 中添加输入参数的检查，如果参数不合法则输出错误信息并退出。
