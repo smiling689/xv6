@@ -97,3 +97,55 @@ xv6在运行时大致的运行模式是：
 
 所以这样的输出应该是没有问题的。
 
+### 7. trace实现思路与问题
+
+由于接触trace发现比较复杂，所以稍微写写。
+
+这个任务希望我们增加一个trace函数，调用它后会在后续运行的时候trace出每个系统调用的名字和参数。
+
+首先先在 user/user.h 中声明trace函数：
+
+  int trace(int);
+
+然后在 user/usys.pl 中添加trace的系统调用：
+
+  entry trace
+
+在这里，调用entry，entry函数会生成一个名为 _trace 的用户级函数，这个函数会执行 ecall 指令来触发系统调用。
+
+由于trace是进程级的，所以在内核中需要为每个进程维护一个trace_mask来记录哪些系统调用需要被trace。
+
+在 kernel/proc.h 中的 proc 结构体中添加了一个 trace_mask 字段：
+
+  int trace_mask;              // Trace mask for syscalls
+
+并对 kernel/proc.c 中的部分函数进行修改：
+
+  - allocproc 函数中初始化 trace_mask 为 0。
+  - fork 函数中复制父进程的 trace_mask 到子进程。
+  - freeproc 函数中不需要特别处理 trace_mask，因为进程被回收后，内存会被释放。
+
+在修改这个文件时有疑问：初始化是procinit还是allocproc？
+
+检查发现procinit是在系统启动时被调用的，而allocproc是在创建新进程时被调用的。所以应该修改allocproc来初始化每个新进程的trace_mask。
+
+然后实现kernel/sysproc.c中的sys_trace函数，这是在调用trace进入kernel之后会调用的函数。
+
+注意，这里本来准备写 myproc()->trace_mask |= mask; ，但是题目要求的好像是通过这个来设置而非增加。所以改为了=。
+
+接着修改kernel/syscall.c，这个文件的作用是根据系统调用号来调用对应的系统调用处理函数。
+
+这里要加入我们刚才定义的sys_trace函数，并且在调用系统调用处理函数之前检查当前进程的trace_mask，如果需要trace，就输出系统调用的名字和参数。名字需要增加一个表来输出。
+
+总结一下运行流程：
+
+输入trace 32 grep hello README
+
+-> 用户态调用trace函数，传入参数32
+
+-> trace函数触发系统调用，进入内核态，调用sys_trace函数，设置当前进程的trace_mask为32
+
+-> 用户态继续执行grep hello README，触发系统调用，进入内核态，syscall.c中的syscalls数组根据系统调用号调用对应的处理函数
+
+-> 在syscall.c中，检查当前进程的trace_mask，如果需要trace，就输出系统调用的名字和参数
+
