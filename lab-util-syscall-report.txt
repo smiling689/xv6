@@ -1,0 +1,204 @@
+## My notes for Lab 1: System Calls
+
+### 1. clang
+
+在开始实验时发现clang在编译user.echo.c时无法找到kernel中的头文件，排查后发现是因为clang默认的头文件路径不包含kernel中的头文件路径。
+
+解决方法：新增使用compile_flags参数指定头文件路径。
+
+### 2. qemu-system-misc 安装报错
+
+在安装qemu-system-misc时遇到报错pkgProblemResolver::Resolve generated breaks。
+
+检查得是 apt 源混用了两个 Ubuntu 版本。系统是 Ubuntu 20.04 focal，但源里多了一条 Ubuntu 22.04 jammy：
+
+  /etc/apt/sources.list 里面现在同时有：
+
+  - focal
+  - focal-updates
+  - focal-security
+  - jammy
+
+  apt 在解依赖时开始尝试往 jammy 方向升级一部分桌面包，结果依赖链对不上，就报了 pkgProblemResolver::Resolve generated breaks
+  
+  解决办法：把那条 jammy 源注释掉，然后更新索引再装 QEMU 成功。
+
+### 3. sleep.c遇到的问题
+
+在尝试sleep.c的时候，发现输入的第二个参数如果是负数或者包含非数字字符，不会报错
+
+原因：检查知，xv6 的 atoi 在 user/ulib.c:84 里只会连续读取数字字符，"-1" 中的 '-' 或者非数字无法识别。
+
+解决方法：在 sleep.c 中添加输入参数的检查，如果参数不合法则输出错误信息并退出。
+
+### 4. make grade时报错
+
+运行make grade的时候报错make: ./grade-lab-syscall: Command not found
+
+检查得是因为在运行make grade时，当前目录下没有grade-lab-syscall这个可执行文件。
+
+解决方法：新增了一个grade-lab-syscall文件。
+
+### 5. pingpong中pipe相关功能的学习实现
+
+#### 相关函数
+
+在pingpong中，主要运用的函数有pipe，close，read，write。
+
+pipe函数用于创建一个管道，接收一个整数数组作为参数，返回两个文件描述符，分别用于读和写。
+
+close函数用于关闭一个文件描述符，释放系统资源。
+
+read函数用于从一个文件描述符中读取数据，接收一个缓冲区和要读取的字节数作为参数，返回实际读取的字节数。
+
+write函数用于向一个文件描述符中写入数据，接收一个缓冲区和要写入的字节数作为参数，返回实际写入的字节数。
+
+#### 关于pipe与close
+
+在写代码过程中，关于close的时机遇到了一些困惑。
+
+最终的结论是，在父进程中，首先关闭读端，在子进程中，首先关闭写端。这样可以确保父进程只负责写数据，子进程只负责读数据，避免了资源的浪费和潜在的死锁问题。
+
+另外，在父进程中，写完数据后需要关闭写端，以通知子进程数据已经写入完成。子进程在读完数据后也需要关闭读端，以释放资源。
+
+#### 关于read和write
+
+在使用read和write的时候也遇到了一些关于同步的问题。
+
+查询资料得，read是一个阻塞函数，如果没有数据可读，它会一直等待直到有数据可读为止。
+
+而write函数则是非阻塞的，如果写入的数据超过了管道的缓冲区大小，write函数会返回一个错误。
+
+所以，不需要考虑父子进程谁先谁后的问题，因为read会自动等待数据的到来，形成同步机制。
+
+### 6.pingpong实现时关于pid的理解
+
+在运行pingpong的时候，输出如：
+
+  $ pingpong
+  4: received ping
+  3: received pong
+  $ pingpong
+  6: received ping
+  5: received pong
+  $ pingpong
+  8: received ping
+  7: received pong
+
+一开始认为，每次使用pingpong的父子pid都是增长的，意味着前一次pingpong的父子进程没有被正确回收。
+
+xv6在运行时大致的运行模式是：
+
+  - 每执行一次 pingpong，shell 都会先 fork 出一个新进程来运行这个程序。
+  - 这个 pingpong 进程内部又会再 fork 出一个子进程。
+  - 所以每次运行通常都会消耗两个新的 PID。
+  - xv6 的 PID 不会因为旧进程退出就立刻复用原来的 PID。
+
+所以这样的输出应该是没有问题的。
+
+### 7. trace实现思路与问题
+
+由于接触trace发现比较复杂，所以稍微写写。
+
+这个任务希望我们增加一个trace函数，调用它后会在后续运行的时候trace出每个系统调用的名字和参数。
+
+首先先在 user/user.h 中声明trace函数：
+
+  int trace(int);
+
+然后在 user/usys.pl 中添加trace的系统调用：
+
+  entry trace
+
+在这里，调用entry，entry函数会生成一个名为 _trace 的用户级函数，这个函数会执行 ecall 指令来触发系统调用。
+
+由于trace是进程级的，所以在内核中需要为每个进程维护一个trace_mask来记录哪些系统调用需要被trace。
+
+在 kernel/proc.h 中的 proc 结构体中添加了一个 trace_mask 字段：
+
+  int trace_mask;              // Trace mask for syscalls
+
+并对 kernel/proc.c 中的部分函数进行修改：
+
+  - allocproc 函数中初始化 trace_mask 为 0。
+  - fork 函数中复制父进程的 trace_mask 到子进程。
+  - freeproc 函数中不需要特别处理 trace_mask，因为进程被回收后，内存会被释放。
+
+在修改这个文件时有疑问：初始化是procinit还是allocproc？
+
+检查发现procinit是在系统启动时被调用的，而allocproc是在创建新进程时被调用的。所以应该修改allocproc来初始化每个新进程的trace_mask。
+
+然后实现kernel/sysproc.c中的sys_trace函数，这是在调用trace进入kernel之后会调用的函数。
+
+注意，这里本来准备写 myproc()->trace_mask |= mask; ，但是题目要求的好像是通过这个来设置而非增加。所以改为了=。
+
+接着修改kernel/syscall.c，这个文件的作用是根据系统调用号来调用对应的系统调用处理函数。
+
+这里要加入我们刚才定义的sys_trace函数，并且在调用系统调用处理函数之前检查当前进程的trace_mask，如果需要trace，就输出系统调用的名字和参数。名字需要增加一个表来输出。
+
+总结一下运行流程：
+
+输入trace 32 grep hello README
+
+-> 用户态调用trace函数，传入参数32
+
+-> trace函数触发系统调用，进入内核态，调用sys_trace函数，设置当前进程的trace_mask为32
+
+-> 用户态继续执行grep hello README，触发系统调用，进入内核态，syscall.c中的syscalls数组根据系统调用号调用对应的处理函数
+
+-> 在syscall.c中，检查当前进程的trace_mask，如果需要trace，就输出系统调用的名字和参数
+
+### 8. sys_info的实现与问题
+
+这个任务要求我们实现一个sys_info系统调用，返回内存使用情况和进程数量。
+
+与trace相比，区别主要在我们的任务变为了在sys_info中收集系统信息并返回给用户态，而不是在每次系统调用时输出信息。
+
+同样还是首先在 user/user.h 中声明 sysinfo 函数，在 user/usys.pl 中添加 sysinfo 的系统调用，在 kernel/syscall.c 中添加 sys_sysinfo 函数.
+
+不过要记得在实现 trace 的时候加了一个表，所以在实现 sysinfo 的时候也要在这个表里添加 sysinfo 的名字。
+
+在 kernel/sysproc.c 中实现 sys_sysinfo 函数，这个函数需要收集系统信息并返回给用户态。
+
+内存数据来源是 kernel/kalloc.c ，新增一个freemem函数来获取空间大小并在kernel/def.h中声明。
+
+此处遇到问题，第一次写的时候没有考虑锁相关的内容，导致如果在获取系统信息的过程中有其他进程在分配或释放内存，可能会导致数据不一致。
+
+解决方法：在 sys_sysinfo 函数中获取内存信息时，先获取 kalloc_lock 锁，确保在获取内存信息的过程中不会有其他进程修改内存状态。获取完信息后再释放锁。
+
+进程数的数据来源是 kernel/proc.c 中的 proc 数组，可以通过遍历这个数组来统计当前系统中有多少个进程正在运行。同样需要获取锁。
+
+### 10. 新建python 3.12环境运行测试 make grade 得到：
+
+== Test sleep, no arguments == 
+$ make qemu-gdb
+sleep, no arguments: OK (2.2s) 
+== Test sleep, returns == 
+$ make qemu-gdb
+sleep, returns: OK (0.8s) 
+== Test sleep, makes syscall == 
+$ make qemu-gdb
+sleep, makes syscall: OK (1.1s) 
+== Test pingpong == 
+$ make qemu-gdb
+pingpong: OK (1.0s) 
+== Test lab-util-syscall-report.txt == 
+lab-util-syscall-report.txt: OK 
+== Test trace 32 grep == 
+$ make qemu-gdb
+trace 32 grep: OK (1.1s) 
+== Test trace all grep == 
+$ make qemu-gdb
+trace all grep: OK (0.9s) 
+== Test trace nothing == 
+$ make qemu-gdb
+trace nothing: OK (1.1s) 
+== Test trace children == 
+$ make qemu-gdb
+trace children: OK (7.3s) 
+== Test sysinfotest == 
+$ make qemu-gdb
+sysinfotest: OK (1.0s) 
+Score: 80/80
+
+测试均通过。
