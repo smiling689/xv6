@@ -25,3 +25,9 @@ barrier
 .DS_Store
 *.dSYM
 *.pcap
+
+.vscode/
+.idea/
+.clang-format
+.clangd
+compile_flags.txt
