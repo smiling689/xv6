@@ -76,6 +76,17 @@ usertrap(void)
   if(killed(p))
     exit(-1);
 
+  if(which_dev == 2 && p->alarm_interval > 0 && p->alarm_handler_running == 0){
+    p->alarm_ticks++;
+    if(p->alarm_ticks >= p->alarm_interval){
+      // 保存完整用户态，供 sigreturn() 恢复
+      p->alarm_tf = *(p->trapframe);
+      p->alarm_handler_running = 1;
+      p->alarm_ticks = 0;
+      p->trapframe->epc = p->alarm_handler;
+    }
+  }
+
   // give up the CPU if this is a timer interrupt.
   if(which_dev == 2)
     yield();

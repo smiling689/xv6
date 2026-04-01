@@ -147,6 +147,11 @@ found:
   p->context.sp = p->kstack + PGSIZE;
 
   p->trace_mask = 0;
+  p->alarm_interval = 0;
+  p->alarm_ticks = 0;
+  p->alarm_handler = 0;
+  p->alarm_handler_running = 0;
+  memset(&p->alarm_tf, 0, sizeof(p->alarm_tf));
   return p;
 }
 
@@ -169,6 +174,11 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  p->alarm_interval = 0;
+  p->alarm_ticks = 0;
+  p->alarm_handler = 0;
+  p->alarm_handler_running = 0;
+  memset(&p->alarm_tf, 0, sizeof(p->alarm_tf));
   p->state = UNUSED;
 }
 
@@ -290,6 +300,11 @@ fork(void)
   }
 
   np->trace_mask = p->trace_mask; // copy trace mask from parent
+  np->alarm_interval = p->alarm_interval;
+  np->alarm_ticks = p->alarm_ticks;
+  np->alarm_handler = p->alarm_handler;
+  np->alarm_handler_running = p->alarm_handler_running;
+  np->alarm_tf = p->alarm_tf;
 
   // Copy user memory from parent to child.
   if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){

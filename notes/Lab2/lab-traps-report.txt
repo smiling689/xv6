@@ -1,0 +1,85 @@
+## My notes for Lab 2: Traps
+
+### 1. backtrace
+
+比较容易，在 printf.c 中实现 backtrace 函数，根据ppt的指导写个循环即可。fp-8和fp-16分别保存返回地址和上一个帧指针，循环条件是 fp 在当前栈帧范围内。
+
+然后再 sysproc.c 中加入
+
+#ifdef LAB_TRAPS
+  backtrace();
+#endif
+
+在 defs.h 中加入签名即可。
+
+### 2. alarm
+
+alarm 的主体部分是增加的两个syscall：sigalarm 和 sigreturn
+
+首先现在 user.h，usys.pl（用于用户态），syscall.c 中加入签名，然后开始具体实现
+
+Q：usys.pl 的用处是？
+
+A：生成用户态的 syscall 包装函数，用户态调用 syscall 时会调用这些包装函数，调用 sysproc.c 中的 sys_sigalarm 和 sys_sigreturn。
+
+#### test0
+
+要求可以进入handler
+
+这要求对于proc增加额外状态，所以更改 proc.c 和 proc.h
+
+为了实现这个功能，加入触发周期，距离上一次触发的时间，处理函数的地址，并加入tapframe以保存，方便恢复。
+
+注：这里提前加入了 test2 中提到的 alarm_handler_running 防止对handler程序的重复调用
+
+并在 proc.c 中对这些变量做初始化和释放。
+
+接着实现 sys_sigalarm，只需要正确的从参数中取出interval和handler，保存到 proc 中并重置计数器即可。
+
+Q: 如何在中断时触发 alarm？ 
+
+A: 改epc
+
+理由：trap 返回用户态时，决定下一条指令从哪执行的是 trapframe->epc ， usertrapret() 会把它写回 sepc，再经 sret 返回用户态
+
+得到运行逻辑
+
+  - 如果 alarm_interval > 0 且当前不在 handler 中
+  - 那么 alarm_ticks++
+  - 一旦 alarm_ticks >= alarm_interval：
+      - 先把当前完整 trapframe 保存到 alarm_tf
+      - 标记 alarm_handler_running = 1
+      - 计数清零
+      - 把 p->trapframe->epc 改为 alarm_handler
+
+#### test1
+
+最初设计的时候只保留了epc，但是发现其用户态不完整，无法保存所有寄存器。所以改为保存整个 trapframe，恢复时直接把 alarm_tf 复制回 trapframe 就行了。
+
+其他按着讲义步骤来做即可，记得恢复a0即可。
+
+这样 test2 和 3 也顺便就做完了。
+
+### 3. 测试结果
+
+== Test lab-traps-report.txt == 
+lab-traps-report.txt: OK 
+== Test backtrace test == 
+$ make qemu-gdb
+backtrace test: OK (1.9s) 
+== Test running alarmtest == 
+$ make qemu-gdb
+(3.3s) 
+== Test   alarmtest: test0 == 
+  alarmtest: test0: OK 
+== Test   alarmtest: test1 == 
+  alarmtest: test1: OK 
+== Test   alarmtest: test2 == 
+  alarmtest: test2: OK 
+== Test   alarmtest: test3 == 
+  alarmtest: test3: OK 
+== Test usertests == 
+$ make qemu-gdb
+usertests: OK (35.7s) 
+Score: 94/94
+

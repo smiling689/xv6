@@ -60,6 +60,7 @@ sys_sleep(void)
   acquire(&tickslock);
   ticks0 = ticks;
 #ifdef LAB_TRAPS
+  backtrace();
 #endif
   while(ticks - ticks0 < n){
     if(killed(myproc())){
@@ -126,4 +127,43 @@ sys_sysinfo(void)
         return -1;
     }
     return 0;
+}
+
+uint64
+sys_sigalarm(void)
+{
+  // 从参数中取出interval和handler
+  int interval;
+  uint64 handler;
+  struct proc *p = myproc();
+
+  argint(0, &interval);
+  argaddr(1, &handler);
+
+  if(interval < 0)
+    return -1;
+
+  // 存到proc中
+  p->alarm_interval = interval;
+  p->alarm_handler = handler;
+  // 计时器清零
+  p->alarm_ticks = 0;
+
+  return 0;
+}
+
+uint64
+sys_sigreturn(void)
+{
+  // 先把a0保存下来，因为之后会修改trapframe
+  struct proc *p = myproc();
+  uint64 a0 = p->alarm_tf.a0;
+
+  // 把 alarm_tf 中的寄存器恢复到 trapframe 中
+  *(p->trapframe) = p->alarm_tf;
+  p->alarm_handler_running = 0;
+  p->alarm_ticks = 0;
+
+  // 返回保存的 a0
+  return a0;
 }
