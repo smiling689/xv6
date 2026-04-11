@@ -20,17 +20,43 @@ barrier_init(void)
   assert(pthread_mutex_init(&bstate.barrier_mutex, NULL) == 0);
   assert(pthread_cond_init(&bstate.barrier_cond, NULL) == 0);
   bstate.nthread = 0;
+  bstate.round = 0;
 }
 
 static void 
 barrier()
 {
-  // YOUR CODE HERE
-  //
-  // Block until all threads have called barrier() and
-  // then increment bstate.round.
-  //
-  
+  assert(pthread_mutex_lock(&bstate.barrier_mutex) == 0);
+  // 上一轮还没完全退干净的话 先别让下一轮进来
+  while (bstate.nthread < 0) {
+    assert(pthread_cond_wait(&bstate.barrier_cond, &bstate.barrier_mutex) == 0);
+  }
+
+  int round = bstate.round;
+
+  bstate.nthread++;
+  if (bstate.nthread == nthread) {
+    // 最后一个到了就推进 round 并进入退场阶段
+    bstate.nthread = -nthread;
+    bstate.round++;
+    assert(pthread_cond_broadcast(&bstate.barrier_cond) == 0);
+  } else {
+    while (round == bstate.round) {
+      assert(pthread_cond_wait(&bstate.barrier_cond, &bstate.barrier_mutex) == 0);
+    }
+  }
+
+  // 退场阶段 再等到这一轮的人都真的离开 barrier
+  bstate.nthread++;
+  if (bstate.nthread == 0) {
+    assert(pthread_cond_broadcast(&bstate.barrier_cond) == 0);
+  } else {
+    while (bstate.nthread < 0) {
+      assert(pthread_cond_wait(&bstate.barrier_cond, &bstate.barrier_mutex) == 0);
+    }
+  }
+
+  assert(pthread_mutex_unlock(&bstate.barrier_mutex) == 0);
 }
 
 static void *

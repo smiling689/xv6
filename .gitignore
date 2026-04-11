@@ -31,3 +31,5 @@ barrier
 .clang-format
 .clangd
 compile_flags.txt
+
+.codex
