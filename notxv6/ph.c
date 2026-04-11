@@ -14,6 +14,7 @@ struct entry {
   struct entry *next;
 };
 struct entry *table[NBUCKET];
+pthread_mutex_t locks[NBUCKET];
 int keys[NKEYS];
 int nthread = 1;
 
@@ -40,6 +41,8 @@ static
 void put(int key, int value)
 {
   int i = key % NBUCKET;
+  // 每个桶自己一把锁 这样不会把整张表全串行化
+  pthread_mutex_lock(&locks[i]);
 
   // is the key already present?
   struct entry *e = 0;
@@ -54,6 +57,7 @@ void put(int key, int value)
     // the new is new.
     insert(key, value, &table[i], table[i]);
   }
+  pthread_mutex_unlock(&locks[i]);
 
 }
 
@@ -62,11 +66,13 @@ get(int key)
 {
   int i = key % NBUCKET;
 
-
   struct entry *e = 0;
+  // get 也锁对应的桶 读链表的时候别和 put 撞上
+  pthread_mutex_lock(&locks[i]);
   for (e = table[i]; e != 0; e = e->next) {
     if (e->key == key) break;
   }
+  pthread_mutex_unlock(&locks[i]);
 
   return e;
 }
@@ -116,6 +122,10 @@ main(int argc, char *argv[])
   assert(NKEYS % nthread == 0);
   for (int i = 0; i < NKEYS; i++) {
     keys[i] = random();
+  }
+  for (int i = 0; i < NBUCKET; i++) {
+    // 提前把每个桶的锁都准备好
+    assert(pthread_mutex_init(&locks[i], NULL) == 0);
   }
 
   //
