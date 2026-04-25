@@ -1,0 +1,150 @@
+## My notes for Lab 4: Lock
+
+### 1. Memory allocator
+
+这一部分主要是 `kernel/kalloc.c`
+
+原来的实现里只有一个 `kmem.lock` 和一条 freelist
+
+这样 `kalloc` 和 `kfree` 不管在哪个 CPU 上跑，最后都会去抢同一把锁，所以 `kalloctest` 里面 kmem 的 test-and-set 很高
+
+按讲义思路，改成 per-CPU freelist
+
+先把 `kmem` 改成数组，变成 `kmem[NCPU]`
+
+每个元素里还是一把锁和一条 freelist，只是现在每个 CPU 管自己的
+
+初始化的时候把每个锁都命名成 `kmem`
+
+`freerange` 不需要特别复杂，ppt 里也说了，直接让当前 CPU 把这些页都 free 进去就行，所以保留 `kfree(p)` 的写法
+
+`kfree` 里面关键点是 `cpuid()` 不能乱用
+
+一开始如果直接取 `cpuid()`，可能中途线程被切走，取到的 CPU 和真正操作链表的 CPU 不一致
+
+所以改成 `push_off()` 之后再 `cpuid()`，然后把页挂到当前 CPU 的 freelist
+
+`kalloc` 先尝试本地 freelist
+
+如果本地有页，直接拿走一页返回，这部分锁竞争就很低了
+
+如果本地没页，就要偷别的 CPU 的 freelist
+
+这里遇到的主要问题是，偷的时候不能乱拿多把锁，不然很容易死锁
+
+最后的做法是一次只拿一个 victim 的锁，不同时持有两个 kmem 锁
+
+然后在 victim 的链表里用快慢指针找中点，拆下来后半段，返回第一张页，剩下的页再挂回当前 CPU 的 freelist
+
+这样不同 CPU 平时各用各的，只有本地空了才会有 stealing
+
+测出来 `kalloctest` 的 `tot= 0`
+
+### 2. Buffer cache
+
+这一部分主要是 `kernel/bio.c`
+
+原始实现是一个全局 `bcache.lock` 加一个 LRU 双向链表
+
+问题是不同进程就算访问不同 block，也都要先过这把大锁，所以 `bcachetest` 的争用会很高
+
+讲义里的思路是 hash bucket
+
+所以把原来的全局链表去掉，换成固定数量的 bucket，我这里用了 `13`
+
+每个 bucket 一把 `bcache.bucket` 锁，一个双向链表头
+
+另外保留一个全局 `bcache.lock`
+
+这个全局锁不是保护所有普通查找，而是只在 miss 的时候串行分配空闲 buf，防止同时 miss 的两个线程搞出两份同样的 block cache
+
+`bget` 的逻辑后来分成两段
+
+第一段是快路径：先只拿目标 bucket 的锁，在这个 bucket 里查 `(dev, blockno)`，如果命中就 `refcnt++` 然后返回
+
+这样不同 bucket 的命中基本不会互相卡住
+
+第二段是慢路径：如果 miss，再拿全局 `bcache.lock`，重新检查一次目标 bucket，做 double check
+
+这里 double check 很重要，不然两个线程可能都第一次 miss，然后都去分配新 buf
+
+确认还是 miss 之后，再串行扫所有 bucket，找 `refcnt==0` 的空闲 buf
+
+如果空闲 buf 不在目标 bucket，就先从原 bucket 摘下来，再挂到目标 bucket
+
+然后重置 `dev/blockno/valid/refcnt`
+
+按题目要求只要找到任意空闲 buf 即可
+
+这个部分最容易错的是死锁和重复缓存
+
+一开始就在想要不要同时拿多个 bucket 锁一直不放，但这样顺序稍微不一致就危险
+
+最后统一成：
+
+  - 普通命中只拿一个 bucket 锁
+  - miss 的时候先拿全局 `bcache.lock`
+  - 扫 bucket 时一次最多只额外拿一个 bucket 锁
+  - 迁移 buf 的时候保证当前目标 bucket 锁还在手上
+
+这样下来结构简单一些，也比较稳
+
+`brelse` 也不再碰全局 LRU，只需要先释放睡眠锁，再去对应 bucket 里减 `refcnt`
+
+`bpin` 和 `bunpin` 也改成只拿对应 bucket 的锁
+
+测出来 `bcachetest` 的 `test0` 里 `tot= 0`
+
+### 3. 这次遇到的一些问题
+
+#### Memory allocator 里关于偷页
+
+最开始直觉是从别的 CPU 偷一整条链表，这样写最简单
+
+但是这样会导致 victim 很容易一下子被搬空，后面它自己又要继续去偷，感觉不太合理
+
+所以后来改成偷一半
+
+快慢指针刚好比较方便，不用先数长度
+
+#### Buffer cache 里关于唯一副本
+
+这个问题比 kalloc 难一点
+
+因为 kalloc 的页本来就是谁拿到都行，但 bcache 不行，同一个 `(dev, blockno)` 只能有一个 buf
+
+所以最后保留了一个全局 `bcache.lock` 专门管 miss 时的“找空闲 buf + 绑定新 block”
+
+平时命中不走这把锁，只在慢路径串行
+
+### 4. 测试结果
+
+运行得到：
+
+== Test lab-lock-report.txt == 
+lab-lock-report.txt: OK 
+== Test running kalloctest == 
+$ make qemu-gdb
+(41.5s) 
+== Test   kalloctest: test1 == 
+  kalloctest: test1: OK 
+== Test   kalloctest: test2 == 
+  kalloctest: test2: OK 
+== Test   kalloctest: test3 == 
+  kalloctest: test3: OK 
+== Test kalloctest: sbrkmuch == 
+$ make qemu-gdb
+kalloctest: sbrkmuch: OK (4.6s) 
+== Test running bcachetest == 
+$ make qemu-gdb
+(18.2s) 
+== Test   bcachetest: test0 == 
+  bcachetest: test0: OK 
+== Test   bcachetest: test1 == 
+  bcachetest: test1: OK 
+== Test   bcachetest: test2 == 
+  bcachetest: test2: OK 
+== Test usertests == 
+$ make qemu-gdb
+usertests: OK (40.4s) 
+Score: 94/94
