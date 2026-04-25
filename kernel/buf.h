@@ -5,8 +5,7 @@ struct buf {
   uint blockno;
   struct sleeplock lock;
   uint refcnt;
-  struct buf *prev; // LRU cache list
+  struct buf *prev; // 所在 bucket 的双向链表
   struct buf *next;
   uchar data[BSIZE];
 };
-
