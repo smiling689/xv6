@@ -188,6 +188,10 @@ uint64          walkaddr(pagetable_t, uint64);
 int             copyout(pagetable_t, uint64, char *, uint64);
 int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
+#ifdef LAB_PGTBL
+// 页表打印
+void            vmprint(pagetable_t);
+#endif
 
 // plic.c
 void            plicinit(void);

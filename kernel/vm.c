@@ -293,6 +293,39 @@ freewalk(pagetable_t pagetable)
   kfree((void*)pagetable);
 }
 
+#ifdef LAB_PGTBL
+static void
+vmprintwalk(pagetable_t pagetable, int depth)
+{
+  // 遍历本级页表
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+    if((pte & PTE_V) == 0)
+      continue;
+
+    // 打印当前 PTE
+    uint64 pa = PTE2PA(pte);
+    for(int j = 0; j < depth; j++)
+      printf(" ..");
+    printf("%d: pte %p pa %p\n", i, pte, pa);
+
+    // 递归下一级页表
+    if((pte & (PTE_R | PTE_W | PTE_X)) == 0)
+      vmprintwalk((pagetable_t)pa, depth + 1);
+  }
+}
+
+void
+vmprint(pagetable_t pagetable)
+{
+  // 打印根页表
+  printf("page table %p\n", pagetable);
+
+  // 打印页表树
+  vmprintwalk(pagetable, 1);
+}
+#endif
+
 // Free user memory pages,
 // then free page-table pages.
 void

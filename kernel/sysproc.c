@@ -75,10 +75,40 @@ sys_sleep(void)
 
 
 #ifdef LAB_PGTBL
-int
+uint64
 sys_pgaccess(void)
 {
-  // lab pgtbl: your code here.
+  // 解析参数
+  uint64 start, dst;
+  int len;
+  unsigned int mask = 0;
+  struct proc *p = myproc();
+
+  argaddr(0, &start);
+  argint(1, &len);
+  argaddr(2, &dst);
+
+  // 限制 bitmask 大小
+  if(len < 0 || len > 32)
+    return -1;
+
+  // 扫描每个页面
+  for(int i = 0; i < len; i++){
+    pte_t *pte = walk(p->pagetable, start + i * PGSIZE, 0);
+    if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
+      return -1;
+
+    // 记录并清除访问位
+    if(*pte & PTE_A){
+      mask |= (1U << i);
+      *pte &= ~PTE_A;
+    }
+  }
+
+  // 返回访问掩码
+  if(copyout(p->pagetable, dst, (char *)&mask, sizeof(mask)) < 0)
+    return -1;
+
   return 0;
 }
 #endif
