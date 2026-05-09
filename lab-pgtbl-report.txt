@@ -1,0 +1,101 @@
+## My notes for Lab 5: Page Tables
+
+### 1. speed up system calls
+
+这一部分主要是给 getpid 做一个用户态可读的共享页。
+
+按照讲义，USYSCALL 已经在 memlayout.h 里面给好了，user/ulib.c 里面也已经有 ugetpid，所以主要工作在 proc 相关代码里。
+
+首先在 proc.h 中给 proc 加一个 usyscallpage 指针，用来保存这个共享页在内核里的地址。
+
+然后在 allocproc 中 kalloc 一页，清零后把 pid 写进去：
+
+  p->usyscallpage->pid = p->pid;
+
+接着在 proc_pagetable 中把这个页映射到 USYSCALL，权限是 PTE_R | PTE_U。
+
+这里注意不要给 PTE_W，因为用户态只应该读 pid，不应该能写。
+
+释放的时候也要处理两部分：
+
+  - proc_freepagetable 里 uvmunmap 取消映射
+  - freeproc 里 kfree 释放物理页
+
+一开始容易忘的是 exec 时也会重新建页表，所以 proc_pagetable 里面必须统一加这个映射，而不是只在 userinit 或 fork 的某个地方单独处理。
+
+### 2. print a page table
+
+这一部分是实现 vmprint。
+
+思路基本就是模仿 freewalk，遍历 512 个 PTE，只打印 valid 的项。
+
+如果一个 PTE 是 valid，但是没有 R/W/X，说明它不是叶子节点，而是指向下一级页表，所以递归继续打印。
+
+格式上比较容易出错，grade 脚本会匹配输出，所以最后按讲义里的格式来：
+
+  page table %p
+  ..0: pte %p pa %p
+
+缩进就是每一层多输出一个 " .."。
+
+然后在 exec.c 中 return argc 之前加：
+
+  if(p->pid == 1)
+    vmprint(p->pagetable);
+
+这里 pid == 1 是为了只打印 init 的页表，不然每次 exec 都打印会很乱。
+
+### 3. detect which pages have been accessed
+
+这一部分是实现 pgaccess。
+
+先在 riscv.h 里加 PTE_A，访问位是第 6 位：
+
+  #define PTE_A (1L << 6)
+
+sys_pgaccess 需要三个参数：起始虚拟地址，页数，用户态接收 bitmask 的地址。
+
+实现时先用 argaddr 和 argint 取参数，然后对每一页调用 walk 找到对应 PTE。
+
+如果 PTE_A 被设置，就把 mask 对应 bit 置 1：
+
+  mask |= (1U << i)
+
+同时要把 PTE_A 清掉，不然下次调用 pgaccess 的时候旧访问记录还在，就没法判断两次调用之间有没有新的访问。
+
+最后用 copyout 把 mask 写回用户态。
+
+这里限制 len <= 32，因为测试里使用的是 unsigned int mask，一共也就 32 位。这样实现比较简单，也够实验用。
+
+### 4. 遇到的问题
+
+第一次跑 pgtbltest 的时候，ugetpid 过了，但是 pgaccess 失败。检查后发现是 pgaccess 还只是空函数，继续实现 PTE_A 检查和清零后通过。
+
+### 5. 测试结果
+
+运行 pgtbltest 得到：
+
+  ugetpid_test: OK
+  pgaccess_test: OK
+  pgtbltest: all tests succeeded
+
+运行 make grade 得到：
+
+== Test pgtbltest == 
+$ make qemu-gdb
+(4.2s) 
+== Test   pgtbltest: ugetpid == 
+  pgtbltest: ugetpid: OK 
+== Test   pgtbltest: pgaccess == 
+  pgtbltest: pgaccess: OK 
+== Test pte printout == 
+$ make qemu-gdb
+pte printout: OK (0.5s) 
+== Test lab-pgtbl-report.txt == 
+lab-pgtbl-report.txt: OK 
+== Test usertests == 
+$ make qemu-gdb
+(66.4s) 
+== Test   usertests: all tests == 
+  usertests: all tests: OK 
+Score: 45/45
