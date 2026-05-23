@@ -72,6 +72,8 @@ void*           kalloc(void);
 void            kfree(void *);
 void            kinit(void);
 uint64          freemem(void);
+// COW 引用计数
+void            kaddref(void *);
 
 // log.c
 void            initlog(int, struct superblock*);
@@ -180,6 +182,8 @@ void            uvmfirst(pagetable_t, uchar *, uint);
 uint64          uvmalloc(pagetable_t, uint64, uint64, int);
 uint64          uvmdealloc(pagetable_t, uint64, uint64);
 int             uvmcopy(pagetable_t, pagetable_t, uint64);
+// COW 实际复制
+int             cowcopy(pagetable_t, uint64);
 void            uvmfree(pagetable_t, uint64);
 void            uvmunmap(pagetable_t, uint64, uint64, int);
 void            uvmclear(pagetable_t, uint64);

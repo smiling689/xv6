@@ -352,6 +352,7 @@ typedef uint64 *pagetable_t; // 512 PTEs
 #define PTE_X (1L << 3)
 #define PTE_U (1L << 4) // user can access
 #define PTE_A (1L << 6) // 已访问
+#define PTE_COW (1L << 8) // COW 标记
 
 
 

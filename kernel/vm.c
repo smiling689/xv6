@@ -337,9 +337,8 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 }
 
 // Given a parent process's page table, copy
-// its memory into a child's page table.
-// Copies both the page table and the
-// physical memory.
+// its mappings into a child's page table.
+// Share physical memory using COW.
 // returns 0 on success, -1 on failure.
 // frees any allocated pages on failure.
 int
@@ -348,28 +347,68 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
+  // 遍历父进程用户页
   for(i = 0; i < sz; i += PGSIZE){
+    // 检查父进程 PTE
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
+
+    // 原可写页改成 COW
     pa = PTE2PA(*pte);
+    if(*pte & PTE_W)
+      *pte = (*pte & ~PTE_W) | PTE_COW;
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+
+    // 子进程共享同一物理页
+    kaddref((void*)pa);
+    if(mappages(new, i, PGSIZE, pa, flags) != 0){
+      kfree((void*)pa);
       goto err;
     }
   }
   return 0;
 
  err:
+  // 回滚子进程映射
   uvmunmap(new, 0, i / PGSIZE, 1);
   return -1;
+}
+
+int
+cowcopy(pagetable_t pagetable, uint64 va)
+{
+  pte_t *pte;
+  uint64 pa;
+  uint flags;
+  char *mem;
+
+  // 地址合法性检查
+  if(va >= MAXVA)
+    return -1;
+  va = PGROUNDDOWN(va);
+
+  // 查找 COW 页
+  if((pte = walk(pagetable, va, 0)) == 0)
+    return -1;
+  if((*pte & (PTE_V | PTE_U | PTE_COW)) != (PTE_V | PTE_U | PTE_COW))
+    return -1;
+
+  // 分配私有副本
+  pa = PTE2PA(*pte);
+  flags = (PTE_FLAGS(*pte) | PTE_W) & ~PTE_COW;
+  if((mem = kalloc()) == 0)
+    return -1;
+
+  // 复制内容并替换映射
+  memmove(mem, (char*)pa, PGSIZE);
+  *pte = PA2PTE(mem) | flags;
+
+  // 释放旧引用
+  kfree((void*)pa);
+  return 0;
 }
 
 // mark a PTE invalid for user access.
@@ -395,19 +434,29 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
   pte_t *pte;
 
   while(len > 0){
+    // 定位目标页
     va0 = PGROUNDDOWN(dstva);
     if(va0 >= MAXVA)
       return -1;
     pte = walk(pagetable, va0, 0);
-    if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0 ||
-       (*pte & PTE_W) == 0)
+    if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
       return -1;
+
+    // copyout 写 COW 页
+    if((*pte & PTE_W) == 0){
+      if(cowcopy(pagetable, va0) < 0)
+        return -1;
+      pte = walk(pagetable, va0, 0);
+    }
+
+    // 本页内复制
     pa0 = PTE2PA(*pte);
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
     memmove((void *)(pa0 + (dstva - va0)), src, n);
 
+    // 移动到下一页
     len -= n;
     src += n;
     dstva = va0 + PGSIZE;
