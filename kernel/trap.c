@@ -65,6 +65,11 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(r_scause() == 15){
+    // COW 写缺页
+    uint64 va = r_stval();
+    if(va >= p->sz || cowcopy(p->pagetable, va) < 0)
+      setkilled(p);
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
@@ -229,4 +234,3 @@ devintr()
     return 0;
   }
 }
-

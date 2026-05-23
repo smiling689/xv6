@@ -1,0 +1,158 @@
+## My notes for Lab 6: Copy-on-Write Fork
+
+### 1. COW fork
+
+这一部分主要是改 `kernel/vm.c` 里面的 `uvmcopy`。
+
+原来的 fork 会给子进程重新 `kalloc` 每一页，然后把父进程的内容全部复制过去。
+
+这样在 `cowtest` 的 simple 里会直接失败，因为父进程已经分配了很多物理内存，再完整复制一份就不够了。
+
+按讲义思路，fork 的时候不再复制物理页，而是让子进程页表直接映射到父进程的物理页。
+
+如果父进程原来的页是可写的，就把父进程 PTE 里的 `PTE_W` 清掉，然后加上 `PTE_COW`。
+
+子进程映射时也使用同样的 flags，所以父子进程看到的都是只读 COW 页。
+
+这样 fork 本身基本只复制页表，不复制内存内容。
+
+这里加了一个新的 PTE 标志：
+
+  `PTE_COW`
+
+它用的是 RSW 里的 bit，也就是给软件自己用的位。
+
+这样可以区分两种只读页：
+
+  - 原本就只读的 text 页
+  - 原本可写但现在因为 COW 临时只读的页
+
+如果没有这个标志，写 text 页和写 COW 页就分不清了。
+
+### 2. 引用计数
+
+这一部分主要是 `kernel/kalloc.c`。
+
+COW 之后，一个物理页可能同时被父进程和多个子进程映射，所以不能像原来一样 `uvmunmap` 时直接 `kfree`。
+
+如果直接释放，会导致其他进程还在用这个页，但是 freelist 已经把它当成空闲页了。
+
+所以我在 `kalloc.c` 里加了一个引用计数数组：
+
+  `kref.count[]`
+
+数组下标用物理地址算：
+
+  `(pa - KERNBASE) / PGSIZE`
+
+因为物理内存范围是固定的，这样写比较简单。
+
+引用计数需要并发访问，所以另外有一把 `kref.lock`。
+
+`kalloc` 分配出新页时，把引用计数设成 1。
+
+`uvmcopy` 共享父进程物理页时，调用 `kaddref` 增加引用计数。
+
+`kfree` 现在不是立刻释放，而是先把引用计数减一。
+
+如果减完后还有引用，就直接返回。
+
+只有引用计数变成 0 的时候，才真正把页填 junk，然后挂回 per-CPU freelist。
+
+这里要注意初始化阶段。
+
+`freerange` 是通过反复调用 `kfree` 把空闲物理页放进 freelist 的。
+
+所以初始化时先把每一页的引用计数设成 1，再调用 `kfree`，这样 `kfree` 减到 0 后就会正常加入 freelist。
+
+### 3. COW page fault
+
+这一部分在 `kernel/trap.c` 和 `kernel/vm.c`。
+
+当用户进程写一个 COW 页时，因为 PTE_W 已经被清掉，会触发 store page fault。
+
+在 RISC-V 里这个 scause 是 15。
+
+所以在 `usertrap` 里加一段处理：
+
+  - 读取 `r_stval()` 得到出错虚拟地址
+  - 检查地址不能超过 `p->sz`
+  - 调用 `cowcopy` 真正复制页面
+
+`cowcopy` 的逻辑比较直接：
+
+先把虚拟地址向下对齐，然后 walk 到对应的 PTE。
+
+如果 PTE 不是 valid、不是 user、或者没有 `PTE_COW`，就说明这不是合法的 COW fault，返回错误。
+
+合法的话就 `kalloc` 一个新页，把旧物理页内容 `memmove` 过去。
+
+然后把当前进程这个 PTE 改成指向新页，并恢复 `PTE_W`，清掉 `PTE_COW`。
+
+最后对旧物理页调用 `kfree`，也就是减少旧页引用计数。
+
+如果 `kalloc` 失败，就让进程被 kill。
+
+### 4. copyout
+
+这个地方一开始比较容易漏。
+
+用户态自己写 COW 页会触发 page fault，但是内核里的 `copyout` 是内核直接往用户页写，比如 pipe read、exec 传 argv 等。
+
+这种写不会走普通用户态 store fault，所以如果 `copyout` 遇到 COW 页，也必须主动做同样的复制。
+
+所以我在 `copyout` 里检查目标页。
+
+如果页 valid 且 user，但是没有 `PTE_W`，就尝试调用 `cowcopy`。
+
+如果是合法 COW 页，复制后继续写。
+
+如果不是 COW 页，比如原本只读的页，就返回 -1。
+
+这样 `cowtest` 里面的 file 测试才能过。
+
+### 5. 遇到的问题
+
+#### 初始化引用计数
+
+这里如果直接让所有引用计数初始为 0，然后 `freerange` 调 `kfree`，会触发 `kfree ref`。
+
+原因是 `kfree` 现在会先减引用计数，而初始化阶段其实也是通过 `kfree` 把页放进 freelist。
+
+最后的做法是在 `freerange` 里对每个页先设成 1，再调用 `kfree`。
+
+#### copyout 不是 page fault
+
+最开始实现 COW 时主要关注 `usertrap`。
+
+但是文档里专门提到了 `copyout`，因为内核写用户页不会自动走用户态 page fault 逻辑。
+
+所以单独把 `cowcopy` 抽成一个函数，让 `usertrap` 和 `copyout` 共用。
+
+这样代码也比较少，不需要写两份复制逻辑。
+
+### 6. 测试结果
+
+在 `cs5670_python_env` 中运行 `make grade` 得到：
+
+== Test running cowtest == 
+$ make qemu-gdb
+(5.5s) 
+== Test   simple == 
+  simple: OK 
+== Test   three == 
+  three: OK 
+== Test   file == 
+  file: OK 
+== Test usertests == 
+$ make qemu-gdb
+(36.8s) 
+== Test   usertests: copyin == 
+  usertests: copyin: OK 
+== Test   usertests: copyout == 
+  usertests: copyout: OK 
+== Test   usertests: all tests == 
+  usertests: all tests: OK 
+== Test lab-cow-report.txt == 
+lab-cow-report.txt: OK 
+Score: 114/114

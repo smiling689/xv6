@@ -24,7 +24,20 @@ struct {
   struct run *freelist;
 } kmem[NCPU];
 
+// 物理页引用计数
+struct {
+  struct spinlock lock;
+  int count[(PHYSTOP - KERNBASE) / PGSIZE];
+} kref;
+
 static struct run *steal_freelist(int cpu);
+
+// 物理地址转数组下标
+static int
+pa2idx(void *pa)
+{
+  return ((uint64)pa - KERNBASE) / PGSIZE;
+}
 
 void
 kinit()
@@ -32,6 +45,9 @@ kinit()
   // 初始化每个 CPU 的锁
   for(int i = 0; i < NCPU; i++)
     initlock(&kmem[i].lock, "kmem");
+
+  // 初始化引用计数锁
+  initlock(&kref.lock, "kref");
 
   // 初始空闲页入链
   freerange(end, (void*)PHYSTOP);
@@ -44,8 +60,24 @@ freerange(void *pa_start, void *pa_end)
 
   // 按页释放整段物理内存
   p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
+  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE){
+    // 初始化时先给一个引用
+    kref.count[pa2idx(p)] = 1;
     kfree(p);
+  }
+}
+
+void
+kaddref(void *pa)
+{
+  // 检查物理页合法性
+  if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+    panic("kaddref");
+
+  // 增加共享引用
+  acquire(&kref.lock);
+  kref.count[pa2idx(pa)]++;
+  release(&kref.lock);
 }
 
 // Free the page of physical memory pointed at by pa,
@@ -60,6 +92,19 @@ kfree(void *pa)
 
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
+
+  // 减少引用计数
+  acquire(&kref.lock);
+  if(kref.count[pa2idx(pa)] < 1)
+    panic("kfree ref");
+  kref.count[pa2idx(pa)]--;
+
+  // 还有引用则不释放
+  if(kref.count[pa2idx(pa)] > 0){
+    release(&kref.lock);
+    return;
+  }
+  release(&kref.lock);
 
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
@@ -160,8 +205,13 @@ kalloc(void)
   pop_off();
 
   // 填充调试字节
-  if(r)
+  if(r){
+    // 新分配页引用为 1
+    acquire(&kref.lock);
+    kref.count[pa2idx(r)] = 1;
+    release(&kref.lock);
     memset((char*)r, 5, PGSIZE); // fill with junk
+  }
   return (void*)r;
 }
 
