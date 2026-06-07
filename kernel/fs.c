@@ -60,31 +60,66 @@ bzero(int dev, int bno)
 
 // Blocks.
 
-// Allocate a zeroed disk block.
+// 下次分配的起点
+static uint balloc_hint;
+
+// Allocate a disk block.
 // returns 0 if out of disk space.
 static uint
-balloc(uint dev)
+ballocz(uint dev, int zero)
 {
-  int b, bi, m;
+  uint b, bi, block, start;
+  int m;
   struct buf *bp;
 
   bp = 0;
-  for(b = 0; b < sb.size; b += BPB){
-    bp = bread(dev, BBLOCK(b, sb));
-    for(bi = 0; bi < BPB && b + bi < sb.size; bi++){
+  start = balloc_hint;
+  // 从上次位置向后找空闲块
+  for(b = start; b < sb.size; b += BPB - (b % BPB)){
+    block = b - (b % BPB);
+    bp = bread(dev, BBLOCK(block, sb));
+    for(bi = b % BPB; bi < BPB && block + bi < sb.size; bi++){
       m = 1 << (bi % 8);
       if((bp->data[bi/8] & m) == 0){  // Is block free?
         bp->data[bi/8] |= m;  // Mark block in use.
         log_write(bp);
         brelse(bp);
-        bzero(dev, b + bi);
-        return b + bi;
+        balloc_hint = block + bi + 1;
+        if(zero)
+          bzero(dev, block + bi);
+        return block + bi;
+      }
+    }
+    brelse(bp);
+  }
+
+  // 回绕扫描前面的空闲块
+  for(b = 0; b < start; b += BPB){
+    block = b - (b % BPB);
+    bp = bread(dev, BBLOCK(block, sb));
+    for(bi = b % BPB; bi < BPB && block + bi < start; bi++){
+      m = 1 << (bi % 8);
+      if((bp->data[bi/8] & m) == 0){
+        bp->data[bi/8] |= m;
+        log_write(bp);
+        brelse(bp);
+        balloc_hint = block + bi + 1;
+        if(zero)
+          bzero(dev, block + bi);
+        return block + bi;
       }
     }
     brelse(bp);
   }
   printf("balloc: out of blocks\n");
   return 0;
+}
+
+// Allocate a zeroed disk block.
+static uint
+balloc(uint dev)
+{
+  return ballocz(dev, 1);
 }
 
 // Free a disk block.
@@ -102,6 +137,9 @@ bfree(int dev, uint b)
   bp->data[bi/8] &= ~m;
   log_write(bp);
   brelse(bp);
+  // 释放靠前块后更新提示
+  if(b < balloc_hint)
+    balloc_hint = b;
 }
 
 // Inodes.
@@ -271,6 +309,9 @@ iget(uint dev, uint inum)
   ip->inum = inum;
   ip->ref = 1;
   ip->valid = 0;
+  // 清空二级间接块缓存
+  ip->diblock_cache_idx = 0;
+  ip->diblock_cache_addr = 0;
   release(&itable.lock);
 
   return ip;
@@ -374,28 +415,36 @@ iunlockput(struct inode *ip)
 // The content (data) associated with each inode is stored
 // in blocks on the disk. The first NDIRECT block numbers
 // are listed in ip->addrs[].  The next NINDIRECT blocks are
-// listed in block ip->addrs[NDIRECT].
+// listed in block ip->addrs[NDIRECT].  The next NDINDIRECT
+// blocks are listed in blocks reached via ip->addrs[NDIRECT+1].
 
 // Return the disk block address of the nth block in inode ip.
 // If there is no such block, bmap allocates one.
 // returns 0 if out of disk space.
 static uint
-bmap(struct inode *ip, uint bn)
+bmap(struct inode *ip, uint bn, int zero, int *allocated)
 {
   uint addr, *a;
   struct buf *bp;
 
+  if(allocated)
+    *allocated = 0;
+
+  // direct block
   if(bn < NDIRECT){
     if((addr = ip->addrs[bn]) == 0){
-      addr = balloc(ip->dev);
+      addr = ballocz(ip->dev, zero);
       if(addr == 0)
         return 0;
       ip->addrs[bn] = addr;
+      if(allocated)
+        *allocated = 1;
     }
     return addr;
   }
   bn -= NDIRECT;
 
+  // singly-indirect block
   if(bn < NINDIRECT){
     // Load indirect block, allocating if necessary.
     if((addr = ip->addrs[NDIRECT]) == 0){
@@ -407,10 +456,61 @@ bmap(struct inode *ip, uint bn)
     bp = bread(ip->dev, addr);
     a = (uint*)bp->data;
     if((addr = a[bn]) == 0){
-      addr = balloc(ip->dev);
+      addr = ballocz(ip->dev, zero);
       if(addr){
         a[bn] = addr;
         log_write(bp);
+        if(allocated)
+          *allocated = 1;
+      }
+    }
+    brelse(bp);
+    return addr;
+  }
+  bn -= NINDIRECT;
+
+  // doubly-indirect block
+  if(bn < NDINDIRECT){
+    uint indirect_idx = bn / NINDIRECT;
+    uint final_offset = bn % NINDIRECT;
+
+    // 分配二级索引块
+    if((addr = ip->addrs[NDIRECT+1]) == 0){
+      addr = balloc(ip->dev);
+      if(addr == 0)
+        return 0;
+      ip->addrs[NDIRECT+1] = addr;
+    }
+    // 找到一级索引块
+    if(ip->diblock_cache_addr != 0 && ip->diblock_cache_idx == indirect_idx){
+      addr = ip->diblock_cache_addr;
+    } else {
+      bp = bread(ip->dev, addr);
+      a = (uint*)bp->data;
+      if((addr = a[indirect_idx]) == 0){
+        addr = balloc(ip->dev);
+        if(addr == 0){
+          brelse(bp);
+          return 0;
+        }
+        a[indirect_idx] = addr;
+        log_write(bp);
+      }
+      brelse(bp);
+      ip->diblock_cache_idx = indirect_idx;
+      ip->diblock_cache_addr = addr;
+    }
+
+    // 找到最终数据块
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    if((addr = a[final_offset]) == 0){
+      addr = ballocz(ip->dev, zero);
+      if(addr){
+        a[final_offset] = addr;
+        log_write(bp);
+        if(allocated)
+          *allocated = 1;
       }
     }
     brelse(bp);
@@ -425,9 +525,10 @@ void
 itrunc(struct inode *ip)
 {
   int i, j;
-  struct buf *bp;
-  uint *a;
+  struct buf *bp, *bp2;
+  uint *a, *a2;
 
+  // 释放 direct blocks
   for(i = 0; i < NDIRECT; i++){
     if(ip->addrs[i]){
       bfree(ip->dev, ip->addrs[i]);
@@ -435,6 +536,7 @@ itrunc(struct inode *ip)
     }
   }
 
+  // 释放 singly-indirect blocks
   if(ip->addrs[NDIRECT]){
     bp = bread(ip->dev, ip->addrs[NDIRECT]);
     a = (uint*)bp->data;
@@ -446,6 +548,30 @@ itrunc(struct inode *ip)
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
   }
+
+  // 释放 doubly-indirect blocks
+  if(ip->addrs[NDIRECT+1]){
+    bp = bread(ip->dev, ip->addrs[NDIRECT+1]);
+    a = (uint*)bp->data;
+    for(i = 0; i < NINDIRECT; i++){
+      if(a[i]){
+        bp2 = bread(ip->dev, a[i]);
+        a2 = (uint*)bp2->data;
+        for(j = 0; j < NINDIRECT; j++){
+          if(a2[j])
+            bfree(ip->dev, a2[j]);
+        }
+        brelse(bp2);
+        bfree(ip->dev, a[i]);
+      }
+    }
+    brelse(bp);
+    bfree(ip->dev, ip->addrs[NDIRECT+1]);
+    ip->addrs[NDIRECT+1] = 0;
+  }
+  // 清空缓存状态
+  ip->diblock_cache_idx = 0;
+  ip->diblock_cache_addr = 0;
   
   ip->size = 0;
   iupdate(ip);
@@ -479,7 +605,7 @@ readi(struct inode *ip, int user_dst, uint64 dst, uint off, uint n)
     n = ip->size - off;
 
   for(tot=0; tot<n; tot+=m, off+=m, dst+=m){
-    uint addr = bmap(ip, off/BSIZE);
+    uint addr = bmap(ip, off/BSIZE, 1, 0);
     if(addr == 0)
       break;
     bp = bread(ip->dev, addr);
@@ -513,12 +639,20 @@ writei(struct inode *ip, int user_src, uint64 src, uint off, uint n)
     return -1;
 
   for(tot=0; tot<n; tot+=m, off+=m, src+=m){
-    uint addr = bmap(ip, off/BSIZE);
+    // 判断是否完整覆盖新块
+    m = min(n - tot, BSIZE - off%BSIZE);
+    int fullblock = (m == BSIZE && off % BSIZE == 0);
+    int allocated;
+    uint addr = bmap(ip, off/BSIZE, !fullblock, &allocated);
     if(addr == 0)
       break;
     bp = bread(ip->dev, addr);
-    m = min(n - tot, BSIZE - off%BSIZE);
     if(either_copyin(bp->data + (off % BSIZE), user_src, src, m) == -1) {
+      // 失败时补零新块
+      if(allocated && fullblock){
+        memset(bp->data, 0, BSIZE);
+        log_write(bp);
+      }
       brelse(bp);
       break;
     }
