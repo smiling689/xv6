@@ -29,6 +29,8 @@ entry("mknod");
 entry("unlink");
 entry("fstat");
 entry("link");
+# symlink 用户态包装
+entry("symlink");
 entry("mkdir");
 entry("chdir");
 entry("dup");

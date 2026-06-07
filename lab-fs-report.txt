@@ -1,0 +1,116 @@
+## My notes for Lab 7: File System
+
+### 1. large files
+
+这一部分主要改的是 `kernel/fs.h` 和 `kernel/fs.c`。
+
+原来的 xv6 inode 里面有 12 个 direct block，再加 1 个 indirect block，所以一个文件最多只能有 12 + 256 = 268 个 block。
+
+这次 lab 要求支持 double indirect。因为磁盘上的 inode 大小不能随便变，所以不能直接往 dinode 里多塞一个地址，只能牺牲一个 direct block，把原来的 12 个 direct block 改成 11 个。
+
+最后 inode 的 block 地址布局变成：
+
+  - 11 个 direct block
+  - 1 个 singly-indirect block
+  - 1 个 doubly-indirect block
+
+所以我先在 `kernel/fs.h` 里面把 NDIRECT 改成 11，然后新增 NDINDIRECT，再把 MAXFILE 改成 NDIRECT + NINDIRECT + NDINDIRECT。
+
+这里要注意 addrs 的长度。虽然 NDIRECT 变小了，但是总地址数量还是 13 个，所以 struct dinode 里的 addrs 要写成 NDIRECT+2。
+
+同样地，`kernel/file.h` 里面内存中的 struct inode 也要同步改成 NDIRECT+2。如果这里只改磁盘结构、不改内存结构，iupdate 和 ilock 复制地址数组的时候就会不一致。
+
+接下来主要改 bmap。前面的 direct 和 singly-indirect 基本沿用原来的逻辑，只是范围随着 NDIRECT 变成了 11。
+
+进入 doubly-indirect 区间后，需要先把逻辑块号转换成两级索引。具体就是用 bn / NINDIRECT 找到 doubly-indirect block 里面的第几个一级 indirect block，再用 bn % NINDIRECT 找到这个一级 indirect block 里面的第几个 data block。
+
+如果中间的索引块还没有分配，就按原来 xv6 的方式调用 balloc 分配，并且修改索引块后调用 log_write。
+
+这里最容易漏的是 itrunc。如果只改 bmap，那么大文件确实可以写出来，但是删除文件或者截断文件的时候，double indirect 里面的 block 不会被释放。
+
+所以我在 itrunc 里面也补了 double indirect 的释放逻辑。大致顺序是先释放 direct blocks，然后释放 singly-indirect 指向的数据块，最后再遍历 doubly-indirect，释放它指向的一级 indirect block 和最终 data block。
+
+### 2. symbolic links
+
+这一部分主要改的是 `kernel/sysfile.c`，另外还要把系统调用的用户态和内核态入口接起来。
+
+首先是系统调用入口。`kernel/syscall.h` 里面本来已经有 SYS_symlink 编号，所以这里不用再新增编号。
+
+需要做的是在 `user/user.h` 里声明 symlink，在 `user/usys.pl` 里加 entry("symlink")，然后在 `kernel/syscall.c` 里把 sys_symlink 接到 syscall table 里面。
+
+然后是文件类型和 open flag。`kernel/stat.h` 里面新增 T_SYMLINK 表示符号链接文件，`kernel/fcntl.h` 里面新增 O_NOFOLLOW，用来表示 open 的时候不跟随符号链接。
+
+sys_symlink 的实现比较直接。先用 argstr 取出 target 和 path，然后用 create(path, T_SYMLINK, 0, 0) 创建一个 symlink inode，最后把 target 路径字符串写进这个 inode 的 data block 里。
+
+这里有一个点是 target 不需要存在。因为符号链接只是保存一个路径字符串，它本来就可以指向一个暂时不存在的路径。
+
+然后修改 sys_open。如果 open 得到的 inode 是 T_SYMLINK，并且用户没有传 O_NOFOLLOW，那就读出 symlink 文件里保存的路径，再用 namei 查找下一层目标。
+
+如果下一层还是 symlink，就继续重复这个过程，直到找到一个非 symlink 的 inode。
+
+为了避免成环，比如 a -> b 和 b -> a，这里不能无限跟随。所以我用了一个简单的循环，最多跟随 10 层。如果 10 层之后还是 symlink，就认为可能成环或者太深，直接返回 -1。
+
+如果用户传了 O_NOFOLLOW，就不进入跟随逻辑，而是像普通文件一样打开 symlink 文件本身。这样 symlinktest 里面用 fstat 检查 T_SYMLINK 才能正常工作。
+
+其他系统调用，比如 link 和 unlink，我没有改。这样它们还是作用在 symlink 本身，这也符合讲义要求。
+
+### 3. 遇到的问题
+
+#### bigfile 超时
+
+一开始实现完 double indirect 后，symlinktest 和 usertests -q 都能过，但是 bigfile 在 grade 脚本的 180 秒内有时候跑不完。
+
+看输出时发现它不是文件大小写错了，而是已经写了很多 block，只是速度太慢。
+
+后面检查发现慢点主要在 balloc。原来的 balloc 每次分配 block 都从 bitmap 开头开始扫，这在普通 xv6 里问题不大，因为文件不会太大。
+
+但是这次 bigfile 要写 65803 个 block，如果每次都从头扫，就会反复扫过很多已经被占用的 bitmap 位，开销会变得很明显。
+
+所以我把 balloc 改成了一个比较简单的 next-fit。用 balloc_hint 记录下次从哪里开始找，分配成功后 hint 往后移动。
+
+如果从 hint 扫到文件系统末尾还没找到空闲块，就再回绕到前面继续扫。释放 block 的时候，如果释放的位置比 hint 更靠前，就把 hint 往前挪。
+
+这样没有改变磁盘格式，也没有改变“从 bitmap 里找空闲块”的语义，只是减少了很多重复扫描。
+
+#### 新 block 清零的问题
+
+后面完整跑 make grade 时，单独跑 bigfile 可以过，但完整跑的时候偶尔还是接近超时。
+
+继续看之后发现，bigfile 每次写的都是完整的 1KB block，但是原来的 balloc 会先把新 block 清零，接着 writei 又马上完整覆盖一次。
+
+也就是说，对于完整覆盖的新 data block，这次清零其实是不必要的。
+
+所以我把分配函数拆成了 ballocz(dev, zero)。元数据 block 仍然走原来的 balloc，保持清零；只有在 writei 里判断当前写入是 full block write 时，新 data block 才允许跳过清零。
+
+为了避免 copyin 失败后留下旧数据，如果这个完整覆盖写失败了，而且 block 是刚分配的，我会再把它补零一次。
+
+这样处理以后，语义上更安全一些，同时 `bigfile` 的时间也稳定了很多。
+
+#### symlink 成环
+
+symlink 的另一个问题是成环。测试里有 b -> a -> b 这种情况，如果 open 的时候一直递归查找，就会卡住。
+
+最后我没有真的维护 visited 集合，而是按讲义提示用了最大深度限制。这里设置成最多跟随 10 次，超过之后返回 -1。
+
+这个实现简单一些，也足够通过实验里的循环链接测试。
+
+### 4. 测试结果
+
+写完上面的报告部分后，在 cs5670_python_env 中运行 make grade 得到：
+
+== Test running bigfile == 
+$ make qemu-gdb
+running bigfile: OK (176.2s) 
+== Test running symlinktest == 
+$ make qemu-gdb
+(0.7s) 
+== Test   symlinktest: symlinks == 
+  symlinktest: symlinks: OK 
+== Test   symlinktest: concurrent symlinks == 
+  symlinktest: concurrent symlinks: OK 
+== Test usertests == 
+$ make qemu-gdb
+usertests: OK (200.6s) 
+== Test lab-fs-report.txt == 
+lab-fs-report.txt: OK 
+Score: 104/104

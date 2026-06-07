@@ -328,6 +328,36 @@ sys_open(void)
       return -1;
     }
     ilock(ip);
+    // 默认跟随符号链接
+    if(ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)){
+      // 最多跟随 10 层
+      for(int i = 0; i < 10; i++){
+        // 读出目标路径
+        int len = readi(ip, 0, (uint64)path, 0, MAXPATH);
+        if(len <= 0){
+          iunlockput(ip);
+          end_op();
+          return -1;
+        }
+        path[MAXPATH-1] = 0;
+        iunlockput(ip);
+        // 打开目标 inode
+        if((ip = namei(path)) == 0){
+          end_op();
+          return -1;
+        }
+        ilock(ip);
+        // 找到普通文件就停止
+        if(ip->type != T_SYMLINK)
+          break;
+      }
+      // 仍然是链接，认为成环或太深
+      if(ip->type == T_SYMLINK){
+        iunlockput(ip);
+        end_op();
+        return -1;
+      }
+    }
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op();
@@ -368,6 +398,36 @@ sys_open(void)
   end_op();
 
   return fd;
+}
+
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH], path[MAXPATH];
+  struct inode *ip;
+  int len;
+
+  if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
+    return -1;
+
+  begin_op();
+  // 创建链接 inode
+  if((ip = create(path, T_SYMLINK, 0, 0)) == 0){
+    end_op();
+    return -1;
+  }
+
+  // 写入目标路径
+  len = strlen(target) + 1;
+  if(writei(ip, 0, (uint64)target, 0, len) != len){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  iunlockput(ip);
+  end_op();
+  return 0;
 }
 
 uint64

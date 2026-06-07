@@ -33,7 +33,11 @@ struct inode {
   short minor;
   short nlink;
   uint size;
-  uint addrs[NDIRECT+1];
+  // 和磁盘 inode 一致的地址表
+  uint addrs[NDIRECT+2];
+  // 最近用过的二级间接块缓存
+  uint diblock_cache_idx;
+  uint diblock_cache_addr;
 };
 
 // map major device number to device functions.

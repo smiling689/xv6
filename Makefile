@@ -248,8 +248,10 @@ UPROGS += \
 endif
 
 ifeq ($(LAB),fs)
+# fs lab tests
 UPROGS += \
-	$U/_bigfile
+	$U/_bigfile\
+	$U/_symlinktest
 endif
 
 

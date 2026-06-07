@@ -105,6 +105,8 @@ extern uint64 sys_trace(void);
 extern uint64 sys_sysinfo(void);
 extern uint64 sys_sigalarm(void);
 extern uint64 sys_sigreturn(void);
+// symlink 系统调用入口
+extern uint64 sys_symlink(void);
 
 #ifdef LAB_NET
 extern uint64 sys_connect(void);
@@ -141,6 +143,8 @@ static uint64 (*syscalls[])(void) = {
 [SYS_sysinfo] sys_sysinfo,
 [SYS_sigalarm] sys_sigalarm,
 [SYS_sigreturn] sys_sigreturn,
+// symlink 分发表项
+[SYS_symlink] sys_symlink,
 #ifdef LAB_NET
 [SYS_connect] sys_connect,
 #endif
@@ -175,6 +179,8 @@ static char *sysnames[] = {
     [SYS_sysinfo] "sysinfo",
     [SYS_sigalarm] "sigalarm",
     [SYS_sigreturn] "sigreturn",
+    // trace 输出名字
+    [SYS_symlink] "symlink",
 };
 
 void
