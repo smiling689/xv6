@@ -1,0 +1,145 @@
+## My notes for Lab 8: mmap
+
+### 1. 系统调用入口
+
+这一部分主要是先把 mmap 和 munmap 接到 xv6 里面。
+
+先在 user/user.h 里面加用户态声明，在 user/usys.pl 里面加 entry。
+
+然后在 kernel/syscall.c 里加 sys_mmap 和 sys_munmap 的声明，放进 syscalls 表，也顺手加到 sysnames 里。
+
+Makefile 里 LAB=mmap 的时候加入 _mmaptest。
+
+这一部分比较像前面 syscall lab，主要就是别漏文件。
+
+### 2. VMA 表
+
+mmap 不能一调用就把文件全读进内存，所以需要先记一条映射关系。
+
+我在 proc.h 里加了 NVMA 16 和 struct vma。
+
+里面主要保存 valid、addr、length、prot、flags、offset 和 file。
+
+addr 是映射的虚拟地址，file 是对应的 struct file。
+
+这里 mmap 里要 filedup 一下，不然后面用户 close(fd) 之后，映射还要继续可用。
+
+allocproc 和 freeproc 里把 vmas 清零。
+
+fork 的时候复制 VMA 表，同时对每个有效 VMA 的 file 做 filedup。
+
+exit 的时候调用 mmapclose，相当于把还没 munmap 的映射都清掉。
+
+### 3. mmap
+
+sys_mmap 里先取参数。
+
+这个 lab 只要求 addr 为 0，offset 为 0 的情况，不过代码里还是把 offset 记进 VMA 里。
+
+然后检查权限。
+
+如果是 MAP_SHARED 且 PROT_WRITE，那么文件必须是 writable。
+
+如果是 MAP_PRIVATE，即使文件只读，也可以给 writable mapping，因为不会写回文件。
+
+找地址的时候我把 mmap 区域放在高地址，从 TRAPFRAME 往下找空洞。
+
+这样不需要改 p->sz，也不会让 uvmcopy 去复制还没加载的 mmap 页。
+
+找到空闲 VMA 槽之后只记录信息，不 kalloc，不 readi，也不 mappages。
+
+也就是 mmap 本身只做记录，真正读文件放到 page fault。
+
+### 4. page fault
+
+在 usertrap 里处理 load page fault 和 store page fault。
+
+原来这个仓库已经有 COW，所以 store page fault 先尝试 COW。
+
+如果不是普通 sz 范围内的 COW，再走 mmapfault。
+
+mmapfault 先按 fault address 找 VMA。
+
+如果没有 VMA，或者写一个没有 PROT_WRITE 的映射，就返回失败。
+
+然后按页对齐 va，kalloc 一页，清零。
+
+接着用 readi 从文件对应 offset 读一页进来。
+
+最后按 prot 设置 PTE_R、PTE_W、PTE_X，然后 mappages 建立映射。
+
+这里要注意 PROT_WRITE 的页也要给 PTE_R，不然 RISC-V 对 writable page 不太正常。
+
+### 5. munmap
+
+munmap 这部分主要是 mmapunmapvma。
+
+先找到 addr 对应的 VMA，然后检查取消范围必须在 VMA 内。
+
+实验保证不会从中间挖洞，所以只处理三种情况：取消头部、取消尾部、取消整个区域。
+
+如果是 MAP_SHARED，需要先把已经加载的页写回文件。
+
+这里一开始容易想直接 uvmunmap 一整段，但是 mmap 是 lazy 的，有些页可能根本没有页表项。
+
+所以我写了 mmapuvmunmap，逐页 walk，如果页不存在就跳过，存在才 uvmunmap。
+
+写回文件也同样只处理已经存在的 PTE。
+
+整段取消时 fileclose，然后清空 VMA。
+
+取消头部时移动 addr 和 offset，减少 length。
+
+取消尾部时只缩短 length。
+
+### 6. 遇到的问题
+
+第一个问题是 mmap 区域要不要算进 p->sz。
+
+一开始如果把 mmap 地址放在 sz 后面再增长 sz，会让 fork 的 uvmcopy 去复制这段区域。
+
+但是 mmap 本来是 lazy 的，很多页根本没映射，普通 uvmcopy 会 panic。
+
+所以最后把 mmap 区域放到 TRAPFRAME 下面的高地址，不改 p->sz。
+
+这样普通堆内存还是走 p->sz，mmap 单独由 VMA 管。
+
+第二个问题是和当前仓库之前的 FS lab 改动有关。
+
+这个仓库里已经实现了双重间接块，MAXFILE 很大。
+
+但是 LAB=mmap 的时候 FSSIZE 还是 2000，如果 usertests 的 writebig 按新的 MAXFILE 写，会 out of blocks 或者超时。
+
+解决方法是把双重间接块相关的 MAXFILE、NADDR、bmap 和 itrunc 的逻辑限制在 LAB_FS。
+
+这样 mmap lab 还是用原始 xv6 的单级间接块大小，usertests 就正常了。
+
+### 7. 测试结果
+
+在 `cs5670_python_env` 中运行 `make grade` 得到：
+
+== Test running mmaptest ==
+$ make qemu-gdb
+(2.9s)
+== Test   mmaptest: mmap f ==
+  mmaptest: mmap f: OK
+== Test   mmaptest: mmap private ==
+  mmaptest: mmap private: OK
+== Test   mmaptest: mmap read-only ==
+  mmaptest: mmap read-only: OK
+== Test   mmaptest: mmap read/write ==
+  mmaptest: mmap read/write: OK
+== Test   mmaptest: mmap dirty ==
+  mmaptest: mmap dirty: OK
+== Test   mmaptest: not-mapped unmap ==
+  mmaptest: not-mapped unmap: OK
+== Test   mmaptest: two files ==
+  mmaptest: two files: OK
+== Test   mmaptest: fork_test ==
+  mmaptest: fork_test: OK
+== Test usertests ==
+$ make qemu-gdb
+usertests: OK (34.6s)
+== Test lab-mmap-report.txt ==
+lab-mmap-report.txt: OK
+Score: 144/144

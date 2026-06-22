@@ -65,11 +65,20 @@ usertrap(void)
     intr_on();
 
     syscall();
-  } else if(r_scause() == 15){
-    // COW 写缺页
+  } else if(r_scause() == 13 || r_scause() == 15){
+    // load/store page fault
     uint64 va = r_stval();
-    if(va >= p->sz || cowcopy(p->pagetable, va) < 0)
+    // 普通用户内存的 COW 写缺页
+    if(r_scause() == 15 && va < p->sz && cowcopy(p->pagetable, va) == 0){
+      // COW 写缺页已处理。
+#ifdef LAB_MMAP
+    // mmap 区域的 lazy 缺页
+    } else if(mmapfault(va, r_scause() == 15) == 0){
+      // mmap 懒加载缺页已处理。
+#endif
+    } else {
       setkilled(p);
+    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {

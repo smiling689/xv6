@@ -28,6 +28,22 @@ struct cpu {
 
 extern struct cpu cpus[NCPU];
 
+#ifdef LAB_MMAP
+// 每个进程固定数量 VMA
+#define NVMA 16
+
+// mmap 虚拟内存区域
+struct vma {
+  int valid;          // 是否正在使用
+  uint64 addr;        // 起始虚拟地址
+  uint64 length;      // 映射长度
+  int prot;           // 映射权限
+  int flags;          // shared/private
+  uint64 offset;      // 文件偏移
+  struct file *file;  // 对应文件
+};
+#endif
+
 // per-process data for the trap handling code in trampoline.S.
 // sits in a page by itself just under the trampoline page in the
 // user page table. not specially mapped in the kernel page table.
@@ -108,6 +124,9 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+#ifdef LAB_MMAP
+  struct vma vmas[NVMA];        // mmap 区域表
+#endif
   int alarm_interval;          // alarm 的触发周期（多少tick）
   int alarm_ticks;             // 自上次触发后累计过的 tick
   uint64 alarm_handler;        // 用户态 alarm 处理函数的地址

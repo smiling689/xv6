@@ -254,6 +254,12 @@ UPROGS += \
 	$U/_symlinktest
 endif
 
+ifeq ($(LAB),mmap)
+# mmap 实验测试程序
+UPROGS += \
+	$U/_mmaptest
+endif
+
 
 
 ifeq ($(LAB),net)

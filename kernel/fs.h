@@ -25,10 +25,24 @@ struct superblock {
 #define FSMAGIC 0x10203040
 
 // 大文件布局参数
+#ifdef LAB_FS
+// FS lab 使用双重间接块
 #define NDIRECT 11
+#else
+// 其他 lab 保持原始布局
+#define NDIRECT 12
+#endif
 #define NINDIRECT (BSIZE / sizeof(uint))
 #define NDINDIRECT (NINDIRECT * NINDIRECT)
+#ifdef LAB_FS
+// 双重间接块容量
 #define MAXFILE (NDIRECT + NINDIRECT + NDINDIRECT)
+#define NADDR (NDIRECT + 2)
+#else
+// 普通单级间接块容量
+#define MAXFILE (NDIRECT + NINDIRECT)
+#define NADDR (NDIRECT + 1)
+#endif
 
 // On-disk inode structure
 struct dinode {
@@ -37,7 +51,7 @@ struct dinode {
   short minor;          // Minor device number (T_DEVICE only)
   short nlink;          // Number of links to inode in file system
   uint size;            // Size of file (bytes)
-  uint addrs[NDIRECT+2];   // direct + indirect + double indirect
+  uint addrs[NADDR];       // direct + indirect; plus double indirect in FS lab
 };
 
 // Inodes per block.

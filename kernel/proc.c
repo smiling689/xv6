@@ -165,6 +165,10 @@ found:
   p->alarm_handler = 0;
   p->alarm_handler_running = 0;
   memset(&p->alarm_tf, 0, sizeof(p->alarm_tf));
+#ifdef LAB_MMAP
+  // 初始化 VMA 表
+  memset(p->vmas, 0, sizeof(p->vmas));
+#endif
   return p;
 }
 
@@ -198,6 +202,10 @@ freeproc(struct proc *p)
   p->alarm_handler = 0;
   p->alarm_handler_running = 0;
   memset(&p->alarm_tf, 0, sizeof(p->alarm_tf));
+#ifdef LAB_MMAP
+  // 清空 VMA 状态
+  memset(p->vmas, 0, sizeof(p->vmas));
+#endif
   p->state = UNUSED;
 }
 
@@ -364,6 +372,16 @@ fork(void)
   for(i = 0; i < NOFILE; i++)
     if(p->ofile[i])
       np->ofile[i] = filedup(p->ofile[i]);
+#ifdef LAB_MMAP
+  // 复制父进程 VMA
+  for(i = 0; i < NVMA; i++){
+    if(p->vmas[i].valid){
+      np->vmas[i] = p->vmas[i];
+      // 保持文件引用有效
+      filedup(np->vmas[i].file);
+    }
+  }
+#endif
   np->cwd = idup(p->cwd);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
@@ -408,6 +426,11 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+#ifdef LAB_MMAP
+  // 退出前释放 mmap 映射
+  mmapclose(p);
+#endif
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
