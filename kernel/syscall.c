@@ -107,6 +107,11 @@ extern uint64 sys_sigalarm(void);
 extern uint64 sys_sigreturn(void);
 // symlink 系统调用入口
 extern uint64 sys_symlink(void);
+#ifdef LAB_MMAP
+// mmap 系统调用入口
+extern uint64 sys_mmap(void);
+extern uint64 sys_munmap(void);
+#endif
 
 #ifdef LAB_NET
 extern uint64 sys_connect(void);
@@ -145,6 +150,11 @@ static uint64 (*syscalls[])(void) = {
 [SYS_sigreturn] sys_sigreturn,
 // symlink 分发表项
 [SYS_symlink] sys_symlink,
+#ifdef LAB_MMAP
+// mmap 分发表项
+[SYS_mmap]    sys_mmap,
+[SYS_munmap]  sys_munmap,
+#endif
 #ifdef LAB_NET
 [SYS_connect] sys_connect,
 #endif
@@ -178,9 +188,14 @@ static char *sysnames[] = {
     [SYS_trace]  "trace",
     [SYS_sysinfo] "sysinfo",
     [SYS_sigalarm] "sigalarm",
-    [SYS_sigreturn] "sigreturn",
+    [SYS_sigreturn] = "sigreturn",
     // trace 输出名字
-    [SYS_symlink] "symlink",
+    [SYS_symlink] = "symlink",
+#ifdef LAB_MMAP
+    // trace 名字
+    [SYS_mmap] = "mmap",
+    [SYS_munmap] = "munmap",
+#endif
 };
 
 void

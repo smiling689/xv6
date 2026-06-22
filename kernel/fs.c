@@ -469,6 +469,8 @@ bmap(struct inode *ip, uint bn, int zero, int *allocated)
   }
   bn -= NINDIRECT;
 
+#ifdef LAB_FS
+  // 只在 FS lab 开启双重间接块
   // doubly-indirect block
   if(bn < NDINDIRECT){
     uint indirect_idx = bn / NINDIRECT;
@@ -516,6 +518,7 @@ bmap(struct inode *ip, uint bn, int zero, int *allocated)
     brelse(bp);
     return addr;
   }
+#endif
   panic("bmap: out of range");
 }
 
@@ -525,8 +528,12 @@ void
 itrunc(struct inode *ip)
 {
   int i, j;
-  struct buf *bp, *bp2;
-  uint *a, *a2;
+  struct buf *bp;
+  uint *a;
+#ifdef LAB_FS
+  struct buf *bp2;
+  uint *a2;
+#endif
 
   // 释放 direct blocks
   for(i = 0; i < NDIRECT; i++){
@@ -549,6 +556,8 @@ itrunc(struct inode *ip)
     ip->addrs[NDIRECT] = 0;
   }
 
+#ifdef LAB_FS
+  // 只在 FS lab 释放双重间接块
   // 释放 doubly-indirect blocks
   if(ip->addrs[NDIRECT+1]){
     bp = bread(ip->dev, ip->addrs[NDIRECT+1]);
@@ -569,6 +578,7 @@ itrunc(struct inode *ip)
     bfree(ip->dev, ip->addrs[NDIRECT+1]);
     ip->addrs[NDIRECT+1] = 0;
   }
+#endif
   // 清空缓存状态
   ip->diblock_cache_idx = 0;
   ip->diblock_cache_addr = 0;

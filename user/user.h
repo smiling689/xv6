@@ -33,6 +33,11 @@ int sleep(int);
 int uptime(void);
 int sigalarm(int ticks, void (*handler)());
 int sigreturn(void);
+#ifdef LAB_MMAP
+// mmap 用户态接口
+void *mmap(void*, size_t, int, int, int, off_t);
+int munmap(void*, size_t);
+#endif
 #ifdef LAB_NET
 int connect(uint32, uint16, uint16);
 #endif

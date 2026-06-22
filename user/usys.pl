@@ -40,6 +40,9 @@ entry("sleep");
 entry("uptime");
 entry("sigalarm");
 entry("sigreturn");
+# mmap 用户态包装
+entry("mmap");
+entry("munmap");
 entry("connect");
 entry("pgaccess");
 entry("trace");

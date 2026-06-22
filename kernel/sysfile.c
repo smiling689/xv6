@@ -6,6 +6,7 @@
 
 #include "types.h"
 #include "riscv.h"
+#include "memlayout.h"
 #include "defs.h"
 #include "param.h"
 #include "stat.h"
@@ -50,6 +51,323 @@ fdalloc(struct file *f)
   }
   return -1;
 }
+
+#ifdef LAB_MMAP
+// 判断地址区间是否重叠
+static int
+vmaoverlap(uint64 a0, uint64 a1, struct vma *v)
+{
+  // 当前 VMA 区间
+  uint64 b0 = v->addr;
+  uint64 b1 = v->addr + v->length;
+  return a0 < b1 && b0 < a1;
+}
+
+// 按虚拟地址查 VMA
+static struct vma*
+findvma(struct proc *p, uint64 va)
+{
+  // 顺序扫描固定表
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].valid && va >= p->vmas[i].addr &&
+       va < p->vmas[i].addr + p->vmas[i].length)
+      return &p->vmas[i];
+  }
+  return 0;
+}
+
+// MAP_SHARED 页写回文件
+static int
+mmapwriteback(struct proc *p, struct vma *v, uint64 addr, uint64 length)
+{
+  pte_t *pte;
+  uint64 a, end, pa, off;
+  int max, n, n1, r;
+
+  // private 映射不用回写
+  if((v->flags & MAP_SHARED) == 0)
+    return 0;
+
+  // 每次事务可写的最大大小
+  max = ((MAXOPBLOCKS-1-1-2) / 2) * BSIZE;
+  end = addr + length;
+
+  // 逐页检查已加载页
+  for(a = addr; a < end; a += PGSIZE){
+    // 懒加载未访问的页直接跳过
+    if((pte = walk(p->pagetable, a, 0)) == 0 || (*pte & PTE_V) == 0)
+      continue;
+
+    // 计算文件偏移
+    pa = PTE2PA(*pte);
+    off = v->offset + (a - v->addr);
+    n = PGSIZE;
+    if(a + n > end)
+      n = end - a;
+
+    // 分段写回文件
+    for(int i = 0; i < n; i += r){
+      n1 = n - i;
+      if(n1 > max)
+        n1 = max;
+      begin_op();
+      ilock(v->file->ip);
+      r = writei(v->file->ip, 0, pa + i, off + i, n1);
+      iunlock(v->file->ip);
+      end_op();
+      if(r != n1)
+        return -1;
+    }
+  }
+  return 0;
+}
+
+// mmap 专用 unmap，允许页不存在
+static void
+mmapuvmunmap(pagetable_t pagetable, uint64 addr, uint64 length)
+{
+  pte_t *pte;
+  uint64 a, end;
+
+  end = addr + length;
+
+  // 逐页取消真实映射
+  for(a = addr; a < end; a += PGSIZE){
+    // 没建页表项就跳过
+    if((pte = walk(pagetable, a, 0)) == 0)
+      continue;
+    // mmap lazy 页可能还没加载
+    if((*pte & PTE_V) == 0)
+      continue;
+    uvmunmap(pagetable, a, 1, 1);
+  }
+}
+
+// 取消一个 VMA 的一段
+static int
+mmapunmapvma(struct proc *p, struct vma *v, uint64 addr, uint64 length)
+{
+  uint64 oldaddr, oldend, end;
+
+  // 参数基本检查
+  if((addr % PGSIZE) != 0 || length == 0)
+    return -1;
+
+  // 对齐取消范围
+  length = PGROUNDUP(length);
+  oldaddr = v->addr;
+  oldend = v->addr + v->length;
+  end = addr + length;
+
+  // 必须落在 VMA 内
+  if(addr < oldaddr || end > oldend)
+    return -1;
+  // 实验保证不从中间挖洞
+  if(addr != oldaddr && end != oldend)
+    return -1;
+
+  // shared 页先写回
+  if(mmapwriteback(p, v, addr, length) < 0)
+    return -1;
+
+  // 再释放页表映射
+  mmapuvmunmap(p->pagetable, addr, length);
+
+  // 整段取消
+  if(addr == oldaddr && end == oldend){
+    fileclose(v->file);
+    memset(v, 0, sizeof(*v));
+  // 取消头部
+  } else if(addr == oldaddr){
+    v->addr = end;
+    v->offset += length;
+    v->length = oldend - end;
+  // 取消尾部
+  } else {
+    v->length = addr - oldaddr;
+  }
+  return 0;
+}
+
+// munmap 公共入口
+int
+mmapunmap(uint64 addr, uint64 length)
+{
+  struct proc *p = myproc();
+
+  // 按起始地址找 VMA
+  struct vma *v = findvma(p, addr);
+
+  if(v == 0)
+    return -1;
+
+  // 复用统一 unmap 逻辑
+  return mmapunmapvma(p, v, addr, length);
+}
+
+// 进程退出时关闭所有 mmap
+void
+mmapclose(struct proc *p)
+{
+  // exit 时清理所有 VMA
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].valid)
+      mmapunmapvma(p, &p->vmas[i], p->vmas[i].addr, p->vmas[i].length);
+  }
+}
+
+// mmap lazy page fault
+int
+mmapfault(uint64 va, int write)
+{
+  char *mem;
+  int perm;
+  uint64 a, offset;
+  struct proc *p = myproc();
+  struct vma *v = findvma(p, va);
+
+  // 必须命中某个 VMA
+  if(v == 0)
+    return -1;
+  // 写缺页需要写权限
+  if(write && (v->prot & PROT_WRITE) == 0)
+    return -1;
+  // 读缺页需要可读或可写
+  if(!write && (v->prot & (PROT_READ | PROT_WRITE)) == 0)
+    return -1;
+
+  // 按页对齐 fault 地址
+  a = PGROUNDDOWN(va);
+  // 已经映射则不是 mmap lazy fault
+  if(walkaddr(p->pagetable, a) != 0)
+    return -1;
+
+  // 分配一页物理内存
+  if((mem = kalloc()) == 0)
+    return -1;
+  memset(mem, 0, PGSIZE);
+
+  // 从文件读入对应页
+  offset = v->offset + (a - v->addr);
+  ilock(v->file->ip);
+  readi(v->file->ip, 0, (uint64)mem, offset, PGSIZE);
+  iunlock(v->file->ip);
+
+  // 根据 prot 生成 PTE 权限
+  perm = PTE_U;
+  if(v->prot & PROT_READ)
+    perm |= PTE_R;
+  if(v->prot & PROT_WRITE)
+    perm |= PTE_R | PTE_W;
+  if(v->prot & PROT_EXEC)
+    perm |= PTE_X;
+
+  // 建立用户页映射
+  if(mappages(p->pagetable, a, PGSIZE, (uint64)mem, perm) < 0){
+    kfree(mem);
+    return -1;
+  }
+  return 0;
+}
+
+// mmap 系统调用
+uint64
+sys_mmap(void)
+{
+  int prot, flags;
+  uint64 addr, length, offset, mapaddr;
+  struct file *f;
+  struct proc *p = myproc();
+  struct vma *freevma = 0;
+
+  // 取 mmap 参数
+  argaddr(0, &addr);
+  argaddr(1, &length);
+  argint(2, &prot);
+  argint(3, &flags);
+  argaddr(5, &offset);
+  if(argfd(4, 0, &f) < 0)
+    return -1;
+
+  // 只支持实验要求的文件映射
+  if(addr != 0 || length == 0 || f->type != FD_INODE)
+    return -1;
+  // prot 合法性检查
+  if((prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC)) != 0)
+    return -1;
+  // flags 合法性检查
+  if(flags != MAP_SHARED && flags != MAP_PRIVATE)
+    return -1;
+  // mmap 需要可读文件
+  if(f->readable == 0)
+    return -1;
+  // shared writable 需要文件可写
+  if((flags & MAP_SHARED) && (prot & PROT_WRITE) && f->writable == 0)
+    return -1;
+
+  // VMA 长度按页对齐
+  length = PGROUNDUP(length);
+
+  // 找空闲 VMA 槽
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].valid == 0){
+      freevma = &p->vmas[i];
+      break;
+    }
+  }
+  if(freevma == 0)
+    return -1;
+
+  // 从高地址向下找空洞
+  mapaddr = TRAPFRAME - length;
+  for(;;){
+    int overlap = 0;
+
+    // 避开已有 VMA
+    for(int i = 0; i < NVMA; i++){
+      if(p->vmas[i].valid && vmaoverlap(mapaddr, mapaddr + length, &p->vmas[i])){
+        if(p->vmas[i].addr < length)
+          return -1;
+        mapaddr = p->vmas[i].addr - length;
+        overlap = 1;
+        break;
+      }
+    }
+    if(overlap == 0)
+      break;
+  }
+
+  // 不和普通用户内存冲突
+  if(mapaddr < p->sz || mapaddr + length > TRAPFRAME)
+    return -1;
+
+  // 记录 VMA，不分配物理页
+  freevma->valid = 1;
+  freevma->addr = mapaddr;
+  freevma->length = length;
+  freevma->prot = prot;
+  freevma->flags = flags;
+  freevma->offset = offset;
+  freevma->file = filedup(f);
+
+  // 返回映射起始地址
+  return mapaddr;
+}
+
+// munmap 系统调用
+uint64
+sys_munmap(void)
+{
+  uint64 addr, length;
+
+  // 取 munmap 参数
+  argaddr(0, &addr);
+  argaddr(1, &length);
+
+  // 交给统一 unmap 逻辑
+  return mmapunmap(addr, length);
+}
+#endif
 
 uint64
 sys_dup(void)

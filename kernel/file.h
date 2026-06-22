@@ -34,7 +34,7 @@ struct inode {
   short nlink;
   uint size;
   // 和磁盘 inode 一致的地址表
-  uint addrs[NDIRECT+2];
+  uint addrs[NADDR];   // 和当前 lab 的磁盘 inode 一致
   // 最近用过的二级间接块缓存
   uint diblock_cache_idx;
   uint diblock_cache_addr;
